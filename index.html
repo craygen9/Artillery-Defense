@@ -1,0 +1,1925 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Artillery Defense</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta charset="UTF-8">
+    <style>
+        canvas {
+            border: 2px solid #333;
+            background: linear-gradient(to bottom, #1a1a3a, #0f0f2f);
+        }
+        body {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 75vh;
+            margin: 0;
+            padding: 0;
+            background: #dfe6ee;
+            overscroll-behavior: contain;
+            touch-action: none;
+        }
+        
+        #canvasContainer {
+            position: relative;
+            width: 100%;
+            max-width: 800px;
+            height: auto;
+            display: flex;
+            justify-content: center;
+        }
+        
+        #gameCanvas {
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+        
+        #mobileControls {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            display: none;
+            z-index: 10;
+        }
+        
+        #burstButton {
+            width: 40px;
+            height: 40px;
+            background: rgba(255, 136, 0, 0.5);
+            border: 2px solid #ff8800;
+            border-radius: 50%;
+            color: white;
+            font-weight: bold;
+            font-size: 10px; 
+            text-align: center;
+            line-height: 40px;
+            touch-action: none;
+        }
+        
+        /* New AI control toggle button */
+        #aiToggle {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            padding: 5px 10px;
+            background: #3a5;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            z-index: 100;
+        }
+        
+        #aiToggle:hover {
+            background: #4b6;
+        }
+        
+        /* AI target indicator styles */
+        .ai-target {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="canvasContainer">
+        <canvas id="gameCanvas" width="800" height="600"></canvas>
+        <div id="mobileControls">
+            <div id="burstButton">BURST</div>
+        </div>
+        <button id="aiToggle" style="background: #a35;">AI: OFF</button>
+    </div>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const mobileControls = document.getElementById('mobileControls');
+        const burstButton = document.getElementById('burstButton');
+        const aiToggle = document.getElementById('aiToggle');
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        if (isMobile) {
+            mobileControls.style.display = 'block';
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+        }
+        function resizeCanvas() {
+            const container = document.getElementById('canvasContainer');
+            const aspectRatio = canvas.width / canvas.height;
+            const containerWidth = container.clientWidth;
+            const containerHeight = containerWidth / aspectRatio;
+            canvas.style.width = containerWidth + 'px';
+            canvas.style.height = containerHeight + 'px';
+            if (isMobile) {
+                mobileControls.style.bottom = '20px';
+                mobileControls.style.left = '20px';
+            }
+        }
+
+        // Game Configuration
+        const GAME_CONFIG = {
+            initialLives: 5,
+            initialDifficultyLevel: 1,
+            scoreDifficultyIncrease: 2500,
+            fireRate: {
+                normal: 167,  // ~10 frames @ 60fps
+                burst: 16.7   // ~1 frame @ 60fps
+            },
+            burstMode: {
+                duration: 3000,
+                cooldown: 8000
+            },
+            // Spawn timers (in milliseconds)
+            spawn: {
+                plane: 2000,
+                crate: 4000,
+                airship: 10000,
+                crateChance: 0.05
+            },
+            speed: {
+                bullet: 0.7,
+                plane: 0.24,
+                paratrooper: 0.06,
+                airship: 0.12,
+                crate: 0.25
+            },
+            entity: {
+                bulletRadius: 3,
+                toughParatrooperHealth: 3,
+                normalParatrooperHealth: 1,
+                eliteParatrooperHealth: 6,
+                paraDropChance: 0.01,
+                eliteMinDifficulty: 4
+            },
+            score: {
+                normalParatrooper: 100,
+                toughParatrooper: 300,
+                eliteParatrooper: 600
+            },
+            // Bonus effect durations (in milliseconds)
+            bonus: {
+                slowMo: 10000,
+                scoreMultiplier: 15000,
+                scoreMultiplierValue: 2,
+                spreadFire: 10000,
+                spreadCount: 3,
+                bigBullets: 10000
+            },
+            // AI Configuration
+            ai: {
+                enabled: false,
+                targetUpdateInterval: 100,
+                accuracy: 0.95,
+                predictionMultiplier: 1.2,
+                cratePredictionMultiplier: 1.8,
+                reactionDelay: 50,
+                burstThreshold: 3,
+                difficultyScaling: true,
+                threatThreshold: 170,
+                groundProximityThreshold: 300,
+                crateBasePriority: 150,
+                edgeCompensation: 0.15,
+                bulletMargin: 3,
+                damagePerBullet: 1,
+                damagePerBigBullet: 3
+            }
+        };
+
+        // AI Controller class to manage automated gameplay
+        class AIController {
+            constructor(game) {
+                this.game = game;
+                this.currentTarget = null;
+                this.targetUpdateTimer = 0;
+                this.targetUpdateInterval = GAME_CONFIG.ai.targetUpdateInterval;
+                this.accuracy = GAME_CONFIG.ai.accuracy;
+                this.predictionMultiplier = GAME_CONFIG.ai.predictionMultiplier;
+                this.cratePredictionMultiplier = GAME_CONFIG.ai.cratePredictionMultiplier;
+                this.reactionDelay = GAME_CONFIG.ai.reactionDelay;
+                this.reactionTimer = 0;
+                this.newTargetSelected = false;
+                this.targetChangeDelay = 0;
+                this.missedShots = 0;
+                this.lastAimPosition = null;
+                this.edgeCompensationParatrooper = 15;
+                this.bulletsFiredAtTarget = {};
+                this.completedTargets = new Set();
+                this.lastBulletTime = 0;
+            }
+            
+            update(deltaTime) {
+                this.cleanupTargetTracking();
+                this.targetUpdateTimer += deltaTime;
+                if (this.targetUpdateTimer > this.targetUpdateInterval) {
+                    this.selectTarget();
+                    this.targetUpdateTimer = 0;
+                }
+                if (this.newTargetSelected) {
+                    this.reactionTimer += deltaTime;
+                    if (this.reactionTimer > this.reactionDelay) {
+                        this.reactionTimer = 0;
+                        this.newTargetSelected = false;
+                    } else {
+                        return;
+                    }
+                }
+                if (this.currentTarget && this.currentTarget.active !== false) {
+                    this.aimAtTarget();
+                    this.decideFiring();
+                    this.decideSpecialActions();
+                }
+            }
+
+            cleanupTargetTracking() {
+                for (const id in this.bulletsFiredAtTarget) {
+                    const targetExists = this.game.paratroopers.some(
+                        para => para.active && para.id === parseInt(id)
+                    );
+                    if (!targetExists) {
+                        delete this.bulletsFiredAtTarget[id];
+                    }
+                }
+                
+                this.completedTargets.forEach(id => {
+                    const targetExists = this.game.paratroopers.some(
+                        para => para.active && para.id === id
+                    );
+                    
+                    if (!targetExists) {
+                        this.completedTargets.delete(id);
+                    }
+                });
+            }
+            
+            calculateRequiredBullets(paratrooper) {
+                const damagePerBullet = this.game.activeEffects.bigBullets.active ? 
+                    GAME_CONFIG.ai.damagePerBigBullet : GAME_CONFIG.ai.damagePerBullet;
+                const requiredBullets = Math.ceil(paratrooper.health / damagePerBullet);
+                return requiredBullets + GAME_CONFIG.ai.bulletMargin;
+            }
+
+            trackBulletFired() {
+                if (!this.currentTarget || !(this.currentTarget instanceof Paratrooper)) return;
+                const targetId = this.currentTarget.id;
+                if (!targetId) return;
+                if (!this.bulletsFiredAtTarget[targetId]) {
+                    this.bulletsFiredAtTarget[targetId] = 0;
+                }
+                this.bulletsFiredAtTarget[targetId]++;
+                const requiredBullets = this.calculateRequiredBullets(this.currentTarget);
+                if (this.bulletsFiredAtTarget[targetId] >= requiredBullets) {
+                    this.completedTargets.add(targetId);
+                    this.targetUpdateTimer = this.targetUpdateInterval;
+                    console.log(`Completed target ${targetId}: fired ${this.bulletsFiredAtTarget[targetId]}/${requiredBullets} bullets`);
+                }
+            }
+            
+            selectTarget() {
+                const paratroopers = this.game.paratroopers.filter(p => p.active);
+                const crates = this.game.crates.filter(c => c.active);
+                paratroopers.forEach(para => {
+                    if (!para.id) {
+                        para.id = Math.floor(Math.random() * 1000000); // Simple unique ID
+                    }
+                });
+                if (paratroopers.length === 0 && crates.length === 0) {
+                    this.currentTarget = null;
+                    return;
+                }
+                
+                const targets = [...paratroopers, ...crates];
+                const prioritizedTargets = targets.map(target => {
+                    let priority = 0;
+                    // For paratroopers, prioritize by:
+                    // 1. Distance to ground (closer = higher priority)
+                    // 2. Type (elite > tough > normal)
+                    // 3. Whether target has been completed (completed = lower priority)
+                    if (target instanceof Paratrooper) {
+                        const distanceToGround = canvas.height - 40 - target.y;
+                        priority += Math.pow(1 - distanceToGround / canvas.height, 2) * 100;
+                        if (target.isElite) priority += 30;
+                        else if (target.isTough) priority += 20;
+                        else priority += 10;
+                        if (this.completedTargets.has(target.id)) {
+                            priority *= 0.2;
+                        }
+                        else if (!this.bulletsFiredAtTarget[target.id]) {
+                            priority *= 1.5;
+                        }
+                    }
+                    else if (target.bonus) {
+                        priority += GAME_CONFIG.ai.crateBasePriority;
+                        const heightFactor = target.y / canvas.height;
+                        priority += heightFactor * 30;
+                        if (target.bonus.type === 'life') priority += 50;
+                        else if (target.bonus.type === 'burst') priority += 45;
+                        else if (target.bonus.type === 'nuke') priority += 50;
+                        else if (target.bonus.type === 'multishot') priority += 35;
+                        else if (target.bonus.type === 'slowmo') priority += 35;
+                        else if (target.bonus.type === 'bigbullet') priority += 45;
+                        else priority += 20;
+                    }
+                    return { target, priority };
+                });
+                prioritizedTargets.sort((a, b) => b.priority - a.priority);
+                const newTarget = prioritizedTargets[0]?.target || null;
+                if (newTarget !== this.currentTarget) {
+                    this.currentTarget = newTarget;
+                    this.newTargetSelected = true;
+                    this.reactionTimer = 0;
+                    this.lastAimPosition = null; // Reset aim position when target changes
+                }
+            }
+            
+            aimAtTarget() {
+                if (!this.currentTarget) return;
+                let targetX = this.currentTarget.x;
+                let targetY = this.currentTarget.y;
+                if (this.currentTarget instanceof Paratrooper) {
+                    const distance = this.calculateDistance(this.game.cannon.x, this.game.cannon.y, targetX, targetY);
+                    const constPredFactor = GAME_CONFIG.ai.predictionMultiplier; 
+                    const timeToImpact = distance / (GAME_CONFIG.speed.bullet * constPredFactor);
+                    targetY += this.currentTarget.speed * timeToImpact;
+                    const screenCenter = canvas.width / 2;
+                    const distanceFromCenter = Math.abs(targetX - screenCenter);
+                    const distanceRatio = distanceFromCenter / (canvas.width / 2); // 0 at center, 1 at edges
+                    if (distanceRatio > 0.65) {
+                        targetY -= distanceRatio * 12;
+                    }
+                }
+                else if (this.currentTarget.bonus) {
+                    const distance = this.calculateDistance(this.game.cannon.x, this.game.cannon.y, targetX, targetY);
+                    const timeToImpact = distance / (GAME_CONFIG.speed.bullet * this.cratePredictionMultiplier);
+                    targetY += this.currentTarget.speed * timeToImpact * 0.9;
+                    const screenCenter = canvas.width / 2;
+                    const distanceFromCenter = Math.abs(targetX - screenCenter);
+                    const distanceRatio = distanceFromCenter / (canvas.width / 2); 
+                    const edgeCompensation = GAME_CONFIG.ai.edgeCompensation * distanceRatio * canvas.height;
+                    targetY += edgeCompensation;
+                }
+                if (this.currentTarget instanceof Paratrooper && 
+                   (this.currentTarget.isElite || this.currentTarget.isTough)) {
+                    targetY += 5;
+                }
+                if (this.lastAimPosition && this.currentTarget.bonus) {
+                    const distanceToLast = this.calculateDistance(
+                        this.lastAimPosition.x, this.lastAimPosition.y, 
+                        targetX, targetY
+                    );
+                    if (distanceToLast > 10 && this.missedShots > 2) {
+                        targetY -= 5;
+                        this.missedShots = 0;
+                    }
+                }
+                const accuracyFactor = 1 - this.accuracy;
+                const randomFactor = this.currentTarget.bonus ? accuracyFactor * 20 : accuracyFactor * 40;
+                targetX += (Math.random() - 0.5) * 2 * randomFactor;
+                targetY += (Math.random() - 0.5) * 2 * randomFactor;
+                const dx = targetX - this.game.cannon.x;
+                const dy = targetY - this.game.cannon.y;
+                const angle = Math.atan2(dy, dx);
+                this.game.mouseAngle = Math.max(-Math.PI, Math.min(0, angle));
+                this.game.cannon.angle = this.game.mouseAngle;
+                this.lastAimPosition = { x: targetX, y: targetY };
+                const angleToTarget = Math.atan2(
+                    this.currentTarget.y - this.game.cannon.y, 
+                    this.currentTarget.x - this.game.cannon.x
+                );
+                if (Math.abs(angleToTarget - this.game.cannon.angle) > 0.1) {
+                    this.missedShots++;
+                }
+            }
+            
+            decideFiring() {
+                if (this.currentTarget && this.currentTarget.y < 0) {
+                    this.game.isMouseDown = false;
+                    return;
+                }
+                if (this.currentTarget && this.currentTarget.bonus) {
+                    this.game.isMouseDown = true;
+                    return;
+                }
+                if (this.currentTarget instanceof Paratrooper) {
+                    const targetId = this.currentTarget.id;
+                    if (this.completedTargets.has(targetId)) {
+                        this.targetUpdateTimer = this.targetUpdateInterval;
+                        this.game.isMouseDown = false;
+                        return;
+                    }
+                    if (this.game.isMouseDown && Date.now() - this.lastBulletTime > this.game.fireRate) {
+                        this.lastBulletTime = Date.now();
+                        this.trackBulletFired();
+                    }
+                }
+                if (Math.random() < this.accuracy) {
+                    this.game.isMouseDown = true;
+                } else {
+                    this.game.isMouseDown = Math.random() > 0.1;
+                }
+            }
+
+            decideSpecialActions() {
+                if (!this.game.burstModeActive && this.game.burstModeCooldown <= 0) {
+                    const threatLevel = this.calculateThreatLevel();
+                    if (threatLevel > GAME_CONFIG.ai.threatThreshold) {
+                        this.game.activateBurstMode();
+                        console.log(`AI activated burst mode - Threat level: ${threatLevel}`);
+                    }
+                }
+            }
+            
+            calculateThreatLevel() {
+                let threatLevel = 0;
+                this.game.paratroopers.forEach(para => {
+                    if (!para.active) return;
+                    const distanceToGround = canvas.height - 40 - para.y;
+                    let paraThreat = 0;
+                    if (distanceToGround < GAME_CONFIG.ai.groundProximityThreshold) {
+                        paraThreat = 100 * Math.pow(1 - distanceToGround / GAME_CONFIG.ai.groundProximityThreshold, 2);
+                        if (para.isElite) paraThreat *= 3;
+                        else if (para.isTough) paraThreat *= 2;
+                    } else {
+                        paraThreat = 5;
+                        if (para.isElite) paraThreat = 15;
+                        else if (para.isTough) paraThreat = 10;
+                    }
+                    threatLevel += paraThreat;
+                });
+                return threatLevel;
+            }
+            
+            calculateDistance(x1, y1, x2, y2) {
+                const dx = x2 - x1;
+                const dy = y2 - y1;
+                return Math.sqrt(dx * dx + dy * dy);
+            }
+            
+            // Scale AI parameters based on difficulty
+            adjustForDifficulty() {
+                if (!GAME_CONFIG.ai.difficultyScaling) return;
+                const diffLevel = this.game.difficultyLevel;
+                this.accuracy = Math.min(0.98, GAME_CONFIG.ai.accuracy + (diffLevel * 0.02));
+                this.predictionMultiplier = GAME_CONFIG.ai.predictionMultiplier + (diffLevel * 0.1);
+                this.cratePredictionMultiplier = GAME_CONFIG.ai.cratePredictionMultiplier;
+                this.edgeCompensationParatrooper = 15 * (this.predictionMultiplier / GAME_CONFIG.ai.predictionMultiplier);
+                this.reactionDelay = Math.max(0, GAME_CONFIG.ai.reactionDelay - (diffLevel * 5));
+            }
+            
+            drawTargetPrediction(ctx) {
+                if (!this.currentTarget || !this.lastAimPosition) return;
+                ctx.beginPath();
+                ctx.moveTo(this.currentTarget.x, this.currentTarget.y);
+                ctx.lineTo(this.lastAimPosition.x, this.lastAimPosition.y);
+                if (this.currentTarget.bonus) {
+                    ctx.strokeStyle = 'rgba(255, 215, 0, 0.5)'; // Gold for crates
+                } else {
+                    ctx.strokeStyle = 'rgba(255, 255, 0, 0.5)'; // Yellow for paratroopers
+                }
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.arc(this.lastAimPosition.x, this.lastAimPosition.y, 5, 0, Math.PI * 2);
+                if (this.currentTarget.bonus) {
+                    ctx.fillStyle = 'rgba(255, 215, 0, 0.5)';
+                } else {
+                    ctx.fillStyle = 'rgba(255, 255, 0, 0.5)';
+                }
+                ctx.fill();
+                if (this.currentTarget.bonus) {
+                    const screenCenter = canvas.width / 2;
+                    const distanceFromCenter = Math.abs(this.currentTarget.x - screenCenter);
+                    const distanceRatio = distanceFromCenter / (canvas.width / 2);
+                    const edgeCompensation = this.edgeCompensation * distanceRatio * canvas.height;
+                    ctx.beginPath();
+                    ctx.moveTo(this.lastAimPosition.x, this.lastAimPosition.y - edgeCompensation);
+                    ctx.lineTo(this.lastAimPosition.x, this.lastAimPosition.y);
+                    ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+                    ctx.stroke();
+                }
+            }
+            
+            drawDebugInfo(ctx) {
+                if (!(this.currentTarget instanceof Paratrooper) || !this.currentTarget.id) return;
+                const targetId = this.currentTarget.id;
+                const bulletsFired = this.bulletsFiredAtTarget[targetId] || 0;
+                const requiredBullets = this.calculateRequiredBullets(this.currentTarget);
+                const completed = this.completedTargets.has(targetId);
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillStyle = completed ? 'red' : 'white';
+                ctx.fillText(
+                    `${bulletsFired}/${requiredBullets}${completed ? ' ✓' : ''}`,
+                    this.currentTarget.x,
+                    this.currentTarget.y - 40
+                );
+            }
+            reset() {
+                this.bulletsFiredAtTarget = {};
+                this.completedTargets = new Set();
+                this.lastBulletTime = 0;
+            }
+        }
+
+        class Game {
+			constructor() {
+				this.cannon = new Cannon();
+				this.bullets = [];
+				this.planes = [];
+				this.paratroopers = [];
+				this.crates = [];
+				this.score = 0;
+				this.lives = GAME_CONFIG.initialLives;
+				this.gameOver = false;
+				this.planeSpawnTimer = 0;
+				this.mouseAngle = 0;
+				this.isMouseDown = false;
+				this.isMobile = isMobile;
+				this.touchActive = false;
+				this.touchX = 0;
+				this.touchY = 0;
+				this.autoFire = true;
+				this.normalFireRate = GAME_CONFIG.fireRate.normal;
+				this.burstFireRate = GAME_CONFIG.fireRate.burst;
+				this.fireRate = this.normalFireRate;
+				this.fireTimer = 0;
+				this.burstModeActive = false;
+				this.burstModeTimer = 0;
+				this.burstModeCooldown = 0;
+				this.burstFromCrate = false;
+				this.audio = new AudioManager();
+				this.gameStarted = false;
+				this.difficultyLevel = GAME_CONFIG.initialDifficultyLevel;
+				this.lastDifficultyScore = 0;
+				this.airshipSpawnTimer = 0;
+                this.crateSpawnTimer = 0;
+				this.lastUpdateTime = 0;
+                this.deltaTime = 0;
+                this.activeEffects = {
+                    slowMo: { active: false, timer: 0, duration: GAME_CONFIG.bonus.slowMo },
+                    scoreMultiplier: { active: false, timer: 0, duration: GAME_CONFIG.bonus.scoreMultiplier, value: GAME_CONFIG.bonus.scoreMultiplierValue },
+                    spreadFire: { active: false, timer: 0, duration: GAME_CONFIG.bonus.spreadFire, count: GAME_CONFIG.bonus.spreadCount },
+                    bigBullets: { active: false, timer: 0, duration: GAME_CONFIG.bonus.bigBullets }
+                };
+
+                canvas.addEventListener('mousemove', (e) => {
+                    this.handlePointerMove(e.clientX, e.clientY);
+                });
+
+                canvas.addEventListener('mousedown', () => {
+                    this.isMouseDown = true;
+                });
+
+                canvas.addEventListener('mouseup', () => {
+                    this.isMouseDown = false;
+                });
+
+                canvas.addEventListener('click', () => {
+                    if (!this.gameStarted) {
+                        this.gameStarted = true;
+                        this.audio.context.resume();
+                    } else if (this.gameOver) {
+                        this.reset();
+                    }
+                });
+
+                // Touch controls
+                canvas.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    if (!this.gameStarted) {
+                        this.gameStarted = true;
+                        this.audio.context.resume();
+                    } else if (this.gameOver) {
+                        this.reset();
+                    } else {
+                        this.touchActive = true;
+                        const touch = e.touches[0];
+                        this.handlePointerMove(touch.clientX, touch.clientY);
+                    }
+                });
+
+                canvas.addEventListener('touchmove', (e) => {
+                    e.preventDefault();
+                    if (this.touchActive) {
+                        const touch = e.touches[0];
+                        this.handlePointerMove(touch.clientX, touch.clientY);
+                    }
+                });
+
+                canvas.addEventListener('touchend', (e) => {
+                    e.preventDefault();
+                    this.touchActive = false;
+                });
+                
+                burstButton.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (this.gameStarted && !this.gameOver && !this.burstModeActive && this.burstModeCooldown <= 0) {
+                        this.activateBurstMode();
+                    }
+                });
+
+				document.addEventListener('keydown', (e) => {
+					if (e.code === 'Space' && !this.burstModeActive && this.burstModeCooldown <= 0) {
+						this.activateBurstMode();
+					}
+					// Toggle AI control with 'A' key
+                    if (e.code === 'KeyA') {
+                        this.aiControlled = !this.aiControlled;
+                        aiToggle.textContent = `AI: ${this.aiControlled ? 'ON' : 'OFF'}`;
+                        aiToggle.style.background = this.aiControlled ? '#3a5' : '#a35';
+                    }
+				});
+                this.ai = new AIController(this);
+                this.aiControlled = GAME_CONFIG.ai.enabled;
+                aiToggle.addEventListener('click', () => {
+                    this.aiControlled = !this.aiControlled;
+                    aiToggle.textContent = `AI: ${this.aiControlled ? 'ON' : 'OFF'}`;
+                    aiToggle.style.background = this.aiControlled ? '#3a5' : '#a35';
+                });
+			}
+
+            handlePointerMove(clientX, clientY) {
+                if (this.aiControlled) return;
+                const rect = canvas.getBoundingClientRect();
+                const scaleX = canvas.width / rect.width;
+                const scaleY = canvas.height / rect.height;
+                const canvasX = (clientX - rect.left) * scaleX;
+                const canvasY = (clientY - rect.top) * scaleY;
+                this.touchX = canvasX;
+                this.touchY = canvasY;
+                const x = canvasX - this.cannon.x;
+                const y = canvasY - this.cannon.y;
+                this.mouseAngle = Math.atan2(y, x);
+                this.cannon.angle = Math.max(-Math.PI, Math.min(0, this.mouseAngle));
+            }
+
+            reset() {
+                this.cannon = new Cannon();
+                this.bullets = [];
+                this.planes = [];
+                this.paratroopers = [];
+                this.crates = [];
+                this.score = 0;
+                this.lives = GAME_CONFIG.initialLives;
+                this.gameOver = false;
+                this.planeSpawnTimer = 0;
+                this.fireTimer = 0;
+                this.crateSpawnTimer = 0;
+                this.burstModeActive = false;
+                this.burstModeTimer = 0;
+                this.burstModeCooldown = 0;
+                this.difficultyLevel = GAME_CONFIG.initialDifficultyLevel;
+                this.lastDifficultyScore = 0;
+                this.airshipSpawnTimer = 0;
+                
+                Object.keys(this.activeEffects).forEach(key => {
+                    this.activeEffects[key].active = false;
+                    this.activeEffects[key].timer = 0;
+                });
+                
+                if (this.aiControlled) {
+                    this.ai = new AIController(this);
+                }
+                
+                if (this.aiControlled && this.ai) {
+                    this.ai.reset();
+                }
+            }
+
+			activateBurstMode() {
+					this.burstModeActive = true;
+					this.burstModeTimer = GAME_CONFIG.burstMode.duration;
+					this.fireRate = this.burstFireRate;
+					this.burstFromCrate = false;
+			}
+
+			update(timestamp) {
+			    if (this.lastUpdateTime === 0) {
+			        this.lastUpdateTime = timestamp;
+			    }
+			    this.deltaTime = timestamp - this.lastUpdateTime;
+			    this.lastUpdateTime = timestamp;
+			    
+			    if (!this.gameStarted) return;
+				if (this.gameOver) return;
+
+                this.updateEffects();
+
+				if (this.burstModeActive) {
+					this.burstModeTimer -= this.deltaTime;
+					if (this.burstModeTimer <= 0) {
+						this.burstModeActive = false;
+						this.fireRate = this.normalFireRate;				
+						if (!this.burstFromCrate) {
+							this.burstModeCooldown = GAME_CONFIG.burstMode.cooldown;
+						}
+						this.burstFromCrate = false;
+					}
+				}
+
+				if (this.burstModeCooldown > 0) {
+					this.burstModeCooldown -= this.deltaTime;
+				}
+
+				if (this.isMouseDown) {
+					this.fireTimer += this.deltaTime;
+					if (this.fireTimer >= this.fireRate) {
+						this.fireBullets();
+						this.audio.playSound('fire');
+						this.fireTimer = 0;
+					}
+				}
+
+                if (this.isMobile && this.touchActive && this.autoFire) {
+                    this.isMouseDown = true;
+                } else if (this.isMobile && !this.touchActive) {
+                    this.isMouseDown = false;
+                }
+                
+                if (this.aiControlled && this.gameStarted && !this.gameOver) {
+                    this.ai.update(this.deltaTime);
+                    if (this.score % 1000 === 0 && this.score > 0) {
+                        this.ai.adjustForDifficulty();
+                    }
+                }
+
+				this.planeSpawnTimer += this.deltaTime;
+				if (this.planeSpawnTimer > GAME_CONFIG.spawn.plane) {
+					this.planes.push(new Plane());
+					this.planeSpawnTimer = 0;
+				}
+
+                this.crateSpawnTimer += this.deltaTime;
+                if (this.crateSpawnTimer > GAME_CONFIG.spawn.crate) {
+                    if (Math.random() < GAME_CONFIG.spawn.crateChance) {
+                        const x = Math.random() * (canvas.width - 100) + 50;
+                        this.crates.push(new Crate(x));
+                        this.crateSpawnTimer = 0;
+                    } else {
+                        this.crateSpawnTimer = 7000;
+                    }
+                }
+
+                if (this.score >= this.lastDifficultyScore + GAME_CONFIG.scoreDifficultyIncrease) {
+                    this.difficultyLevel++;
+                    this.lastDifficultyScore = this.score;
+                }
+
+                this.airshipSpawnTimer += this.deltaTime;
+                if (this.airshipSpawnTimer > GAME_CONFIG.spawn.airship && Math.random() < 0.01) {
+                    this.planes.push(new Airship());
+                    this.airshipSpawnTimer = 0;
+                }
+                
+                this.bullets = this.bullets.filter(bullet => bullet.isActive());
+                this.bullets.forEach(bullet => bullet.update(this.deltaTime));
+
+                this.planes.forEach(plane => {
+                    const speedMultiplier = this.activeEffects.slowMo.active ? 0.5 : 1;
+                    plane.update(this.deltaTime * speedMultiplier);
+                    if (plane.shouldDropParatrooper()) {
+                        let isElite = false;
+                        let isTough = false;
+                        if (this.difficultyLevel >= GAME_CONFIG.entity.eliteMinDifficulty) {
+                            isElite = Math.random() < (this.difficultyLevel - GAME_CONFIG.entity.eliteMinDifficulty + 1) * 0.05;
+                        }
+                        if (!isElite) {
+                            isTough = Math.random() < (this.difficultyLevel - 1) * 0.1;
+                        }
+                        
+                        this.paratroopers.push(new Paratrooper(plane.x, plane.y, isTough, isElite));
+                        this.audio.playSound('parachute');
+                    }
+                });
+                this.planes = this.planes.filter(plane => plane.isActive());
+
+                this.paratroopers.forEach(para => {
+                    const speedMultiplier = this.activeEffects.slowMo.active ? 0.5 : 1;
+                    para.update(this.deltaTime * speedMultiplier);
+                });
+                this.paratroopers = this.paratroopers.filter(para => para.isActive());
+
+                this.crates.forEach(crate => crate.update(this.deltaTime));
+                this.crates = this.crates.filter(crate => crate.active);
+                this.bullets.forEach(bullet => {
+                    this.paratroopers.forEach(para => {
+                        if (bullet.checkCollision(para)) {
+                            bullet.active = false;
+                            const damageAmount = bullet.radius > GAME_CONFIG.entity.bulletRadius ? 3 : 1;
+                            para.health -= damageAmount;
+                            if (para.health <= 0) {
+                                para.active = false;
+                                let points;
+                                if (para.isElite) {
+                                    points = GAME_CONFIG.score.eliteParatrooper;
+                                } else if (para.isTough) {
+                                    points = GAME_CONFIG.score.toughParatrooper;
+                                } else {
+                                    points = GAME_CONFIG.score.normalParatrooper;
+                                }
+                                
+                                this.score += this.activeEffects.scoreMultiplier.active ? 
+                                    points * this.activeEffects.scoreMultiplier.value : points;
+                                this.audio.playSound('hit');
+                            } else {
+                                this.audio.playSound('toughHit');
+                            }
+                        }
+                    });
+                    
+                    this.crates.forEach(crate => {
+                        if (bullet.checkCollisionWithCrate(crate)) {
+                            bullet.active = false;
+                            crate.active = false;
+                            this.applyBonus(crate.bonus);
+                            this.audio.playSound('powerup');
+                        }
+                    });
+                });
+
+                this.paratroopers.forEach(para => {
+                    if (para.hasLanded()) {
+                        this.lives--;
+                        para.active = false;
+                        this.audio.playSound('ground');
+                        if (this.lives <= 0) {
+                            this.gameOver = true;
+                        }
+                    }
+                });
+			}
+			
+			updateEffects() {
+                Object.keys(this.activeEffects).forEach(effectName => {
+                    const effect = this.activeEffects[effectName];
+                    if (effect.active) {
+                        effect.timer -= this.deltaTime;
+                        if (effect.timer <= 0) {
+                            effect.active = false;
+                        }
+                    }
+                });
+            }
+            
+            fireBullets() {
+                if (this.activeEffects.spreadFire.active) {
+                    const spreadCount = this.activeEffects.spreadFire.count;
+                    const spreadAngle = Math.PI / 12;
+                    for (let i = 0; i < spreadCount; i++) {
+                        const angle = this.cannon.angle - (spreadAngle * (spreadCount-1) / 2) + (spreadAngle * i);
+                        const bullet = new Bullet(this.cannon.x, this.cannon.y, angle);
+                        if (this.activeEffects.bigBullets.active) {
+                            bullet.radius = 6;
+                        }
+                        this.bullets.push(bullet);
+                    }
+                } else {
+                    const bullet = new Bullet(this.cannon.x, this.cannon.y, this.cannon.angle);
+                    if (this.activeEffects.bigBullets.active) {
+                        bullet.radius = 6;
+                    }
+                    this.bullets.push(bullet);
+                }
+                if (this.aiControlled && this.ai) {
+                    this.ai.lastBulletTime = Date.now();
+                }
+            }
+            
+            applyBonus(bonus) {
+                switch(bonus.type) {
+                    case 'points':
+                        this.score += bonus.value;
+                        this.showFloatingText('+' + bonus.value, bonus.color);
+                        break;
+                        
+                    case 'life':
+                        this.lives += bonus.value;
+                        this.showFloatingText('+1 LIFE', bonus.color);
+                        break;
+                        
+                    case 'burst':
+                        this.burstModeActive = true;
+                        this.burstModeTimer = 3000;
+                        this.fireRate = this.burstFireRate;
+                        this.burstFromCrate = true;
+                        this.showFloatingText('BURST MODE', bonus.color);
+                        break;
+                        
+                    case 'shield':
+                        // Not implementing shield in this version
+                        this.showFloatingText('SHIELD', bonus.color);
+                        break;
+                        
+                    case 'multishot':
+                        this.activeEffects.spreadFire.active = true;
+                        this.activeEffects.spreadFire.timer = GAME_CONFIG.bonus.spreadFire;
+                        this.showFloatingText('SPREAD FIRE', bonus.color);
+                        break;
+                        
+                    case 'slowmo':
+                        this.activeEffects.slowMo.active = true;
+                        this.activeEffects.slowMo.timer = GAME_CONFIG.bonus.slowMo;
+                        this.showFloatingText('SLOW MOTION', bonus.color);
+                        break;
+                        
+                    case 'nuke':
+                        this.paratroopers.forEach(para => {
+                            para.active = false;
+                            this.score += para.isTough ? 300 : 100;
+                        });
+                        this.showFloatingText('NUKE', bonus.color);
+                        break;
+                        
+                    case 'bigbullet':
+                        this.activeEffects.bigBullets.active = true;
+                        this.activeEffects.bigBullets.timer = GAME_CONFIG.bonus.bigBullets;
+                        this.showFloatingText('BIG BULLETS', bonus.color);
+                        break;
+                        
+                    case 'scorex2':
+                        this.activeEffects.scoreMultiplier.active = true;
+                        this.activeEffects.scoreMultiplier.timer = GAME_CONFIG.bonus.scoreMultiplier;
+                        this.showFloatingText('SCORE x2', bonus.color);
+                        break;
+                }
+            }
+            
+            showFloatingText(text, color) {
+                console.log("Bonus activated:", text);
+            }
+
+            draw() {
+				if (!this.gameStarted) {
+					ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+					ctx.fillRect(0, 0, canvas.width, canvas.height);
+					ctx.fillStyle = '#fff';
+					ctx.font = 'bold 40px Arial';
+					ctx.textAlign = 'center';
+					ctx.fillText('Artillery Defense', canvas.width/2, 60);
+					ctx.font = '16px Arial';
+					ctx.fillText('Defend your base by shooting down enemy paratroopers before they land!', canvas.width/2, 100);
+					ctx.fillText('Use your mouse to aim and click to fire. Press SPACE for burst mode.', canvas.width/2, 130);
+					ctx.fillText('Mobile: Touch to aim and fire. Use BURST button for burst mode.', canvas.width/2, 155);
+					ctx.font = 'bold 20px Arial';
+					ctx.fillText('Enemy Types', canvas.width/2, 195);
+					this.drawSampleTrooper(canvas.width/2 - 150, 245, false, false, 'Normal - 1 HP', '#f44');
+					this.drawSampleTrooper(canvas.width/2, 245, true, false, 'Tough - 3 HP', '#44f');
+					this.drawSampleTrooper(canvas.width/2 + 150, 245, false, true, 'Elite - 6 HP', '#ffcc00');
+					ctx.font = 'bold 20px Arial';
+					ctx.fillText('Power-up Crates', canvas.width/2, 315);
+					const crateTypes = [
+					    { type: 'points', color: '#ffd700', symbol: 'P', desc: 'Points +1000' },
+					    { type: 'life', color: '#ff4444', symbol: '♥', desc: '+1 Life' },
+					    { type: 'burst', color: '#ff8800', symbol: 'B', desc: 'Burst Mode' },
+					    { type: 'multishot', color: '#44ff44', symbol: 'X', desc: 'Spread Fire' }
+					];
+					const crateTypes2 = [
+					    { type: 'slowmo', color: '#aa44ff', symbol: 'SM', desc: 'Slow Motion' },
+					    { type: 'nuke', color: '#ff0000', symbol: 'N', desc: 'Screen Nuke' },
+					    { type: 'bigbullet', color: '#4444ff', symbol: '◉', desc: 'Big Bullets' },
+					    { type: 'scorex2', color: '#ffd700', symbol: '2X', desc: 'Score x2' }
+					];
+					for (let i = 0; i < crateTypes.length; i++) {
+					    this.drawSampleCrate(
+					        canvas.width/4 + (i * 150), 
+					        350, 
+					        crateTypes[i].color,
+					        crateTypes[i].symbol,
+					        crateTypes[i].desc
+					    );
+					}
+					for (let i = 0; i < crateTypes2.length; i++) {
+					    this.drawSampleCrate(
+					        canvas.width/4 + (i * 150), 
+					        420, 
+					        crateTypes2[i].color,
+					        crateTypes2[i].symbol,
+					        crateTypes2[i].desc
+					    );
+					}
+					ctx.font = 'bold 22px Arial';
+					ctx.fillStyle = '#ffffff';
+					if (this.isMobile) {
+                        ctx.fillText('Touch Anywhere to Start', canvas.width/2, 520);
+                    } else {
+                        ctx.fillText('Click Anywhere to Start', canvas.width/2, 520);
+                    }
+					ctx.font = '14px Arial';
+					ctx.fillStyle = '#aaaaaa';
+					ctx.fillText('www.craygen.com', canvas.width/2, canvas.height - 20);
+					return;
+				}
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                // Draw stars
+                for (let i = 0; i < 100; i++) {
+                    ctx.fillStyle = `rgba(255, 255, 255, ${Math.random() * 0.5 + 0.5})`;
+                    ctx.fillRect(
+                        Math.random() * canvas.width,
+                        Math.random() * (canvas.height - 100),
+                        1,
+                        1
+                    );
+                }
+
+                const groundGradient = ctx.createLinearGradient(0, canvas.height - 40, 0, canvas.height);
+                groundGradient.addColorStop(0, '#3a5');
+                groundGradient.addColorStop(1, '#263');
+                ctx.fillStyle = groundGradient;
+                ctx.fillRect(0, canvas.height - 40, canvas.width, 40);
+
+                this.cannon.draw();
+                this.bullets.forEach(bullet => bullet.draw());
+                this.planes.forEach(plane => plane.draw());
+                this.paratroopers.forEach(para => para.draw());
+                this.crates.forEach(crate => crate.draw());
+
+				ctx.fillStyle = '#fff';
+				ctx.font = 'bold 16px Arial';
+				ctx.textAlign = 'left';
+				
+				if (this.burstModeActive) {
+					ctx.fillStyle = '#ff0';
+					ctx.fillText(`BURST MODE: ${Math.ceil(this.burstModeTimer / 1000)}s`, 10, 90);
+				} else if (this.burstModeCooldown > 0) {
+					ctx.fillStyle = '#999';
+					ctx.fillText(`BURST READY IN: ${Math.ceil(this.burstModeCooldown / 1000)}s`, 10, 90);
+				} else {
+					ctx.fillStyle = '#0f0';
+					ctx.fillText('BURST READY [SPACE]', 10, 90);
+				}
+
+                this.drawActiveEffects();
+
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 20px Arial';
+                ctx.fillText(`Score: ${this.score}`, 10, 30);
+                ctx.fillText(`Lives: ${this.lives}`, 10, 60);
+                
+                ctx.font = '14px Arial';
+                ctx.textAlign = 'right';
+                ctx.fillStyle = '#aaaaaa';
+                ctx.fillText('craygen.com', canvas.width - 10, canvas.height - 10);
+                ctx.textAlign = 'left';
+
+                if (this.gameOver) {
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.fillStyle = '#fff';
+                    ctx.font = 'bold 40px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('GAME OVER', canvas.width/2, canvas.height/2);
+                    ctx.font = '20px Arial';
+                    ctx.fillText(`Final Score: ${this.score}`, canvas.width/2, canvas.height/2 + 40);
+                    ctx.fillText('Click to restart', canvas.width/2, canvas.height/2 + 80);
+                    ctx.font = '14px Arial';
+                    ctx.textAlign = 'right';
+                    ctx.fillStyle = '#aaaaaa';
+                    ctx.fillText('craygen.com', canvas.width - 10, canvas.height - 10);
+                    
+                    ctx.textAlign = 'left';
+                }
+                
+                if (this.isMobile && this.touchActive) {
+                    ctx.beginPath();
+                    ctx.arc(this.touchX, this.touchY, 10, 0, Math.PI * 2);
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+                    ctx.fill();
+                    ctx.strokeStyle = '#ffffff';
+                    ctx.stroke();
+                }
+                
+                if (this.aiControlled && this.gameStarted && !this.gameOver) {
+                    ctx.fillStyle = '#3a5';
+                    ctx.font = 'bold 16px Arial';
+                    ctx.textAlign = 'left';
+                    
+                    if (this.ai.currentTarget) {
+                        ctx.beginPath();
+                        ctx.arc(this.ai.currentTarget.x, this.ai.currentTarget.y, 12, 0, Math.PI * 2);
+                        ctx.strokeStyle = '#3a5';
+                        ctx.lineWidth = 2;
+                        ctx.stroke();
+                        ctx.beginPath();
+                        ctx.moveTo(this.cannon.x, this.cannon.y);
+                        const aimLength = 50;
+                        ctx.lineTo(
+                            this.cannon.x + Math.cos(this.cannon.angle) * aimLength,
+                            this.cannon.y + Math.sin(this.cannon.angle) * aimLength
+                        );
+                        ctx.strokeStyle = 'rgba(58, 170, 85, 0.6)';
+                        ctx.lineWidth = 1;
+                        ctx.stroke();
+                        this.ai.drawTargetPrediction(ctx);
+                        if (this.ai.currentTarget.bonus) {
+                            ctx.beginPath();
+                            ctx.arc(this.ai.currentTarget.x, this.ai.currentTarget.y, 15, 0, Math.PI * 2);
+                            ctx.strokeStyle = '#ffd700'; // Gold color for crates
+                            ctx.setLineDash([2, 2]);
+                            ctx.lineWidth = 1;
+                            ctx.stroke();
+                            ctx.setLineDash([]);
+                            
+                            // Show crate type
+                            ctx.fillStyle = '#ffd700';
+                            ctx.font = 'bold 12px Arial';
+                            ctx.textAlign = 'center';
+                            ctx.fillText(this.ai.currentTarget.bonus.type, 
+                                         this.ai.currentTarget.x, 
+                                         this.ai.currentTarget.y - 25);
+                        }
+                    }
+                    if (this.paratroopers.length > 0) {
+                        const threatLevel = this.ai.calculateThreatLevel();
+                        let threatColor = '#4f4';
+                        
+                        if (threatLevel > GAME_CONFIG.ai.threatThreshold) {
+                            threatColor = '#f44';
+                        } else if (threatLevel > GAME_CONFIG.ai.threatThreshold * 0.5) {
+                            threatColor = '#ff4';
+                        }
+                        
+                        ctx.fillStyle = threatColor;
+                        ctx.textAlign = 'right'; 
+                        ctx.fillText(`Threat: ${Math.floor(threatLevel)}`, canvas.width - 10, 60); 
+                        ctx.textAlign = 'left';
+                    }
+                    this.ai.drawDebugInfo(ctx);
+                }
+            }
+            
+            drawActiveEffects() {
+                let y = 120;
+                const x = 10;
+                ctx.textAlign = 'left';
+                ctx.font = 'bold 14px Arial';
+                if (this.activeEffects.slowMo.active) {
+                    ctx.fillStyle = '#aa44ff';
+                    ctx.fillText(`SLOW MO: ${Math.ceil(this.activeEffects.slowMo.timer/1000)}s`, x, y);
+                    y += 20;
+                }
+                if (this.activeEffects.scoreMultiplier.active) {
+                    ctx.fillStyle = '#ffd700';
+                    ctx.fillText(`SCORE x${this.activeEffects.scoreMultiplier.value}: ${Math.ceil(this.activeEffects.scoreMultiplier.timer/1000)}s`, x, y);
+                    y += 20;
+                }
+                if (this.activeEffects.spreadFire.active) {
+                    ctx.fillStyle = '#44ff44';
+                    ctx.fillText(`SPREAD FIRE: ${Math.ceil(this.activeEffects.spreadFire.timer/1000)}s`, x, y);
+                    y += 20;
+                }
+                if (this.activeEffects.bigBullets.active) {
+                    ctx.fillStyle = '#ff8800';
+                    ctx.fillText(`BIG BULLETS: ${Math.ceil(this.activeEffects.bigBullets.timer/1000)}s`, x, y);
+                    y += 20;
+                }
+            }
+            drawSampleTrooper(x, y, isTough, isElite, label, color) {
+                ctx.beginPath();
+                ctx.moveTo(x - 20, y - 20);
+                ctx.quadraticCurveTo(x, y - 45, x + 20, y - 20);
+                const paraGradient = ctx.createLinearGradient(x, y - 45, x, y - 20);
+                paraGradient.addColorStop(0, color);
+                paraGradient.addColorStop(1, isElite ? '#cc7700' : (isTough ? '#229' : '#922'));
+                ctx.fillStyle = paraGradient;
+                ctx.fill();
+                ctx.strokeStyle = '#600';
+                ctx.stroke();
+                // Draw strings
+                ctx.beginPath();
+                ctx.moveTo(x - 20, y - 20);
+                ctx.lineTo(x, y);
+                ctx.moveTo(x + 20, y - 20);
+                ctx.lineTo(x, y);
+                ctx.strokeStyle = '#fff';
+                ctx.stroke();
+                // Draw person
+                ctx.beginPath();
+                ctx.arc(x, y, 5, 0, Math.PI * 2);
+                // Update body color to match parachute
+                if (isElite) {
+                    ctx.fillStyle = '#cc7700';
+                } else if (isTough) {
+                    ctx.fillStyle = '#229';
+                } else {
+                    ctx.fillStyle = '#922';
+                }
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.stroke();
+                // Draw legs
+                ctx.beginPath();
+                ctx.moveTo(x, y + 5);
+                ctx.lineTo(x - 5, y + 12);
+                ctx.moveTo(x, y + 5);
+                ctx.lineTo(x + 5, y + 12);
+                // Match leg color to body color
+                if (isElite) {
+                    ctx.strokeStyle = '#cc7700';
+                } else if (isTough) {
+                    ctx.strokeStyle = '#229';
+                } else {
+                    ctx.strokeStyle = '#922';
+                }
+                ctx.stroke();
+                // Draw health indicator
+                if (isTough || isElite) {
+                    ctx.fillStyle = isElite ? '#ffcc00' : '#44f';
+                    ctx.font = '9px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(isElite ? "6" : "3", x, y - 25);
+                }
+                // Draw label
+                ctx.font = '14px Arial';
+                ctx.fillStyle = '#fff';
+                ctx.fillText(label, x, y + 30);
+            }
+
+            drawSampleCrate(x, y, color, symbol, description) {
+                const width = 30;
+                const height = 30;
+                // Draw crate base
+                ctx.save();
+                ctx.translate(x, y);
+                ctx.fillStyle = color;
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 2;
+                // Draw crate
+                ctx.beginPath();
+                ctx.fillRect(-width/2, -height/2, width, height);
+                ctx.strokeRect(-width/2, -height/2, width, height);
+                // Draw cross straps
+                ctx.beginPath();
+                ctx.moveTo(-width/2, 0);
+                ctx.lineTo(width/2, 0);
+                ctx.moveTo(0, -height/2);
+                ctx.lineTo(0, height/2);
+                ctx.strokeStyle = '#ffffff80';
+                ctx.stroke();
+                // Draw bonus symbol
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 16px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(symbol, 0, 0);
+                ctx.restore();
+                // Draw description
+                ctx.font = '14px Arial';
+                ctx.fillStyle = '#fff';
+                ctx.textAlign = 'center';
+                ctx.fillText(description, x, y + 35);
+            }
+        }
+
+        class Cannon {
+            constructor() {
+                this.x = canvas.width / 2;
+                this.y = canvas.height - 40;
+                this.angle = -Math.PI / 4;
+            }
+
+            draw() {
+                // Draw cannon base
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, 20, 0, Math.PI * 2);
+                const baseGradient = ctx.createRadialGradient(
+                    this.x + 5, this.y - 5, 0,
+                    this.x, this.y, 20
+                );
+                baseGradient.addColorStop(0, '#999');
+                baseGradient.addColorStop(1, '#555');
+                ctx.fillStyle = baseGradient;
+                ctx.fill();
+                ctx.strokeStyle = '#333';
+                ctx.stroke();
+                // Draw cannon barrel
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+                const barrelGradient = ctx.createLinearGradient(0, -8, 0, 8);
+                barrelGradient.addColorStop(0, '#777');
+                barrelGradient.addColorStop(0.5, '#999');
+                barrelGradient.addColorStop(1, '#666');
+                ctx.fillStyle = barrelGradient;
+                ctx.fillRect(0, -8, 45, 16);
+                ctx.strokeStyle = '#444';
+                ctx.strokeRect(0, -8, 45, 16);
+                ctx.restore();
+            }
+        }
+
+        class Bullet {
+            constructor(x, y, angle) {
+                this.x = x;
+                this.y = y;
+                this.speed = GAME_CONFIG.speed.bullet;
+                this.angle = angle;
+                this.active = true;
+                this.radius = GAME_CONFIG.entity.bulletRadius;
+            }
+
+            update(deltaTime) {
+                this.x += Math.cos(this.angle) * this.speed * deltaTime;
+                this.y += Math.sin(this.angle) * this.speed * deltaTime;
+                if (this.x < 0 || this.x > canvas.width || this.y < 0 || this.y > canvas.height) {
+                    this.active = false;
+                }
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                const bulletGradient = ctx.createRadialGradient(
+                    this.x, this.y, 0,
+                    this.x, this.y, this.radius
+                );
+                bulletGradient.addColorStop(0, '#ff0');
+                bulletGradient.addColorStop(1, '#f00');
+                ctx.fillStyle = bulletGradient;
+                ctx.fill();
+            }
+
+            checkCollision(para) {
+                const dx = this.x - para.x;
+                const dy = this.y - para.y;
+                return Math.sqrt(dx * dx + dy * dy) < 25;
+            }
+
+            isActive() {
+                return this.active;
+            }
+            
+            checkCollisionWithCrate(crate) {
+                const dx = this.x - crate.x;
+                const dy = this.y - crate.y;
+                return Math.sqrt(dx * dx + dy * dy) < (this.radius + crate.width/2);
+            }
+        }
+
+        class Plane {
+    constructor() {
+        this.direction = Math.random() < 0.5 ? 1 : -1;
+        this.x = this.direction === 1 ? -50 : canvas.width + 50;
+        this.y = 50 + Math.random() * 100;
+        this.speed = GAME_CONFIG.speed.plane;
+        this.dropTimer = 0;
+        this.active = true;
+        this.propellerAngle = 0;
+    }
+
+    update(deltaTime) {
+        this.x += this.direction * this.speed * deltaTime;
+        this.dropTimer += deltaTime;
+        if (this.x < -100 || this.x > canvas.width + 100) {
+            this.active = false;
+        }
+        // Animate propeller
+        this.propellerAngle += 0.05 * deltaTime;
+        if (this.propellerAngle > Math.PI * 2) {
+            this.propellerAngle = 0;
+        }
+    }
+
+    draw() {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        if (this.direction < 0) {
+            ctx.scale(-1, 1);
+        }
+        // Draw plane body
+        ctx.beginPath();
+        ctx.moveTo(-30, 0);
+        ctx.lineTo(30, 0);
+        ctx.lineTo(25, 10);
+        ctx.lineTo(-25, 10);
+        ctx.closePath();
+        const bodyGradient = ctx.createLinearGradient(0, -5, 0, 15);
+        bodyGradient.addColorStop(0, '#a8a8a8');
+        bodyGradient.addColorStop(0.4, '#d8d8d8');
+        bodyGradient.addColorStop(1, '#707070');
+        ctx.fillStyle = bodyGradient;
+        ctx.fill();
+        ctx.strokeStyle = '#444';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        // Draw cockpit
+        ctx.beginPath();
+        ctx.ellipse(10, 0, 12, 7, 0, 0, Math.PI * 2);
+        const cockpitGradient = ctx.createLinearGradient(10, -7, 10, 7);
+        cockpitGradient.addColorStop(0, '#6aafff');
+        cockpitGradient.addColorStop(1, '#1a5999');
+        ctx.fillStyle = cockpitGradient;
+        ctx.fill();
+        ctx.strokeStyle = '#0a2544';
+        ctx.stroke();
+        // Draw tail
+        ctx.beginPath();
+        ctx.moveTo(-25, 0);
+        ctx.lineTo(-35, -10);
+        ctx.lineTo(-25, -10);
+        ctx.closePath();
+        ctx.fillStyle = '#d82800';
+        ctx.fill();
+        ctx.strokeStyle = '#0a2544';
+        ctx.stroke();
+        // Draw propeller
+        ctx.save();
+        ctx.translate(30, 5);
+        ctx.rotate(this.propellerAngle);
+        // Draw blades
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#222';
+        for (let i = 0; i < 2; i++) {
+            ctx.rotate(i * Math.PI);
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(12, 0);
+            ctx.stroke();
+            
+            ctx.beginPath();
+            ctx.ellipse(8, 0, 4, 1, 0, 0, Math.PI * 2);
+            ctx.fillStyle = '#555';
+            ctx.fill();
+        }
+        // Draw center hub
+        ctx.beginPath();
+        ctx.arc(0, 0, 2, 0, Math.PI * 2);
+        ctx.fillStyle = '#333';
+        ctx.fill();
+        ctx.restore();
+        // Draw details - windows along body
+        for (let i = -20; i < 5; i += 7) {
+            ctx.beginPath();
+            ctx.rect(i, 2, 4, 3);
+            ctx.fillStyle = '#6aafff';
+            ctx.fill();
+            ctx.strokeStyle = '#0a2544';
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+
+    shouldDropParatrooper() {
+        return this.dropTimer > 1000 && Math.random() < GAME_CONFIG.entity.paraDropChance;
+    }
+
+    isActive() {
+        return this.active;
+    }
+}
+
+class Airship extends Plane {
+    constructor() {
+        super();
+        this.y = 30;
+        this.speed = GAME_CONFIG.speed.airship;
+        this.width = 120;
+        this.height = 40;
+        this.dropCount = 0;
+        this.maxDrops = 5;
+        this.dropDelay = 500;
+        this.dropTimer = 0;
+        this.engineGlow = 0;
+    }
+
+    update(deltaTime) {
+        this.x += this.direction * this.speed * deltaTime;
+        this.dropTimer += deltaTime;
+        if (this.x < -this.width || this.x > canvas.width + this.width) {
+            this.active = false;
+        }
+        // Animate engine glow
+        this.engineGlow = (Math.sin(Date.now() / 100) + 1) / 2;
+    }
+
+    draw() {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        if (this.direction < 0) {
+            ctx.scale(-1, 1);
+        }
+        // Draw airship body (zeppelin style)
+        const bodyWidth = this.width;
+        const bodyHeight = this.height;
+        // Main body - elliptical shape with gradient
+        ctx.beginPath();
+        ctx.ellipse(0, 0, bodyWidth/2, bodyHeight/2, 0, 0, Math.PI * 2);
+        const bodyGradient = ctx.createLinearGradient(0, -bodyHeight/2, 0, bodyHeight/2);
+        bodyGradient.addColorStop(0, '#c8c8c8');
+        bodyGradient.addColorStop(0.4, '#e8e8e8');
+        bodyGradient.addColorStop(1, '#888888');
+        ctx.fillStyle = bodyGradient;
+        ctx.fill();
+        ctx.strokeStyle = '#444';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        // Draw vertical stabilizers at rear
+        ctx.beginPath();
+        ctx.moveTo(-bodyWidth/2 + 10, 0);
+        ctx.lineTo(-bodyWidth/2 - 10, -bodyHeight/2 - 10);
+        ctx.lineTo(-bodyWidth/2 - 15, -bodyHeight/2 - 10);
+        ctx.lineTo(-bodyWidth/2 - 5, 0);
+        ctx.closePath();
+        ctx.fillStyle = '#d82800';
+        ctx.fill();
+        ctx.strokeStyle = '#444';
+        ctx.stroke();
+        // Draw horizontal line detail along the body
+        ctx.beginPath();
+        ctx.moveTo(-bodyWidth/2 + 10, 5);
+        ctx.lineTo(bodyWidth/2 - 10, 5);
+        ctx.strokeStyle = '#777';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        // Draw windows along the body
+        for (let i = -bodyWidth/2 + 20; i < bodyWidth/2 - 10; i += 15) {
+            ctx.beginPath();
+            ctx.rect(i, -5, 8, 8);
+            const windowGradient = ctx.createLinearGradient(i, -5, i, 3);
+            windowGradient.addColorStop(0, '#6aafff');
+            windowGradient.addColorStop(1, '#1a5999');
+            ctx.fillStyle = windowGradient;
+            ctx.fill();
+            ctx.strokeStyle = '#0a2544';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+        // Draw detailed gondola
+        ctx.beginPath();
+        ctx.rect(-bodyWidth/4, bodyHeight/2, bodyWidth/2, 15);
+        const gondolaGradient = ctx.createLinearGradient(0, bodyHeight/2, 0, bodyHeight/2 + 15);
+        gondolaGradient.addColorStop(0, '#8a8a8a');
+        gondolaGradient.addColorStop(1, '#555');
+        ctx.fillStyle = gondolaGradient;
+        ctx.fill();
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        // Add gondola windows
+        for (let i = -bodyWidth/4 + 10; i < bodyWidth/4; i += 15) {
+            ctx.beginPath();
+            ctx.rect(i, bodyHeight/2 + 5, 8, 5);
+            ctx.fillStyle = '#6aafff';
+            ctx.fill();
+            ctx.strokeStyle = '#0a2544';
+            ctx.lineWidth = 0.75;
+            ctx.stroke();
+        }
+        // Draw engines with glow
+        const engineGlowColor = `rgba(255, ${120 + 135 * this.engineGlow}, 0, ${0.5 + this.engineGlow * 0.5})`;
+        // Left engine
+        ctx.beginPath();
+        ctx.roundRect(-bodyWidth/3, bodyHeight/2 + 10, 10, 8, 2);
+        ctx.fillStyle = '#333';
+        ctx.fill();
+        // Engine flame
+        ctx.beginPath();
+        ctx.moveTo(-bodyWidth/3, bodyHeight/2 + 14);
+        ctx.lineTo(-bodyWidth/3 - 10, bodyHeight/2 + 18);
+        ctx.lineTo(-bodyWidth/3, bodyHeight/2 + 18);
+        ctx.closePath();
+        ctx.fillStyle = engineGlowColor;
+        ctx.fill();
+        // Right engine
+        ctx.beginPath();
+        ctx.roundRect(bodyWidth/3 - 10, bodyHeight/2 + 10, 10, 8, 2);
+        ctx.fillStyle = '#333';
+        ctx.fill();
+        // Engine flame
+        ctx.beginPath();
+        ctx.moveTo(bodyWidth/3, bodyHeight/2 + 14);
+        ctx.lineTo(bodyWidth/3 + 10, bodyHeight/2 + 18);
+        ctx.lineTo(bodyWidth/3, bodyHeight/2 + 18);
+        ctx.closePath();
+        ctx.fillStyle = engineGlowColor;
+        ctx.fill();
+        // Company logo
+        ctx.beginPath();
+        ctx.arc(0, 0, 15, 0, Math.PI * 2);
+        ctx.fillStyle = '#d82800';
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        // Draw logo text
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 10px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('AIR', 0, 0);
+        ctx.restore();
+    }
+
+    shouldDropParatrooper() {
+        if (this.dropCount >= this.maxDrops) return false;
+        this.dropTimer++;
+        if (this.dropTimer >= this.dropDelay) {
+            this.dropTimer = 0;
+            this.dropCount++;
+            return true;
+        }
+        return false;
+    }
+}
+
+		class Paratrooper {
+			constructor(x, y, isTough = false, isElite = false) {
+				const margin = canvas.width * 0.05;
+				this.x = Math.min(Math.max(x, margin), canvas.width - margin);
+				this.y = y;
+				this.speed = GAME_CONFIG.speed.paratrooper;
+				this.active = true;
+				this.swayOffset = 0;
+				this.swayDirection = Math.random() < 0.5 ? 1 : -1;
+				this.swaySpeed = 0.003;
+				this.maxSwayDistance = 15;
+				this.isTough = isTough;
+				this.isElite = isElite;
+				if (this.isElite) {
+					this.health = GAME_CONFIG.entity.eliteParatrooperHealth;
+				} else if (this.isTough) {
+					this.health = GAME_CONFIG.entity.toughParatrooperHealth;
+				} else {
+					this.health = GAME_CONFIG.entity.normalParatrooperHealth;
+				}
+			}
+
+			update(deltaTime) {
+				this.y += this.speed * deltaTime;
+				this.swayOffset += this.swaySpeed * this.swayDirection * deltaTime;
+				const margin = canvas.width * 0.05;
+				const potentialX = this.x + this.swayOffset * this.maxSwayDistance;
+				if (potentialX < margin || potentialX > canvas.width - margin) {
+					this.swayDirection *= -1;
+					this.swayOffset += this.swaySpeed * 2 * deltaTime * this.swayDirection;
+				}
+				if (Math.abs(this.swayOffset) > 1) {
+					this.swayDirection *= -1;
+				}
+			}
+
+            draw() {
+                const paraX = this.x + this.swayOffset * 5;
+                // Draw parachute
+                ctx.beginPath();
+                ctx.moveTo(paraX - 20, this.y - 20);
+                ctx.quadraticCurveTo(paraX, this.y - 45, paraX + 20, this.y - 20);
+                const paraGradient = ctx.createLinearGradient(paraX, this.y - 45, paraX, this.y - 20);
+                if (this.isElite) {
+                    // Elite paratroopers - gold/yellow
+                    paraGradient.addColorStop(0, '#ffcc00');
+                    paraGradient.addColorStop(1, '#cc7700');
+                } else if (this.isTough) {
+                    // Tough paratroopers - blue
+                    paraGradient.addColorStop(0, '#44f');
+                    paraGradient.addColorStop(1, '#229');
+                } else {
+                    // Normal paratroopers - red
+                    paraGradient.addColorStop(0, '#f44');
+                    paraGradient.addColorStop(1, '#922');
+                }
+                ctx.fillStyle = paraGradient;
+                ctx.fill();
+                ctx.strokeStyle = '#600';
+                ctx.stroke();
+                // Draw strings
+                ctx.beginPath();
+                ctx.moveTo(paraX - 20, this.y - 20);
+                ctx.lineTo(paraX, this.y);
+                ctx.moveTo(paraX + 20, this.y - 20);
+                ctx.lineTo(paraX, this.y);
+                ctx.strokeStyle = '#fff';
+                ctx.stroke();
+                // Draw person
+                ctx.beginPath();
+                ctx.arc(paraX, this.y, 5, 0, Math.PI * 2);
+                // Update body colors to match parachute colors
+                if (this.isElite) {
+                    ctx.fillStyle = '#cc7700';
+                } else if (this.isTough) {
+                    ctx.fillStyle = '#229';
+                } else {
+                    ctx.fillStyle = '#922';
+                }
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.stroke();
+                // Draw legs
+                ctx.beginPath();
+                ctx.moveTo(paraX, this.y + 5);
+                ctx.lineTo(paraX - 5, this.y + 12);
+                ctx.moveTo(paraX, this.y + 5);
+                ctx.lineTo(paraX + 5, this.y + 12);
+                if (this.isElite) {
+                    ctx.strokeStyle = '#cc7700';
+                } else if (this.isTough) {
+                    ctx.strokeStyle = '#229';
+                } else {
+                    ctx.strokeStyle = '#922';
+                }
+                ctx.stroke();
+                if (this.isTough || this.isElite) {
+                    ctx.fillStyle = this.isElite ? '#ffcc00' : '#44f';
+                    ctx.font = '9px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(this.health.toString(), paraX, this.y - 25);
+                }
+            }
+            hasLanded() {
+                return this.y >= canvas.height - 40;
+            }
+            isActive() {
+                return this.active;
+            }
+        }
+
+class AudioManager {
+    constructor() {
+        this.context = new (window.AudioContext || window.webkitAudioContext)();
+        this.sounds = {};
+        this.createSounds();
+    }
+
+    createSounds() {
+        this.sounds.fire = this.createSound((ctx) => {
+            const oscillator = ctx.createOscillator();
+            const gainNode = ctx.createGain();
+            oscillator.type = 'triangle';
+            oscillator.frequency.setValueAtTime(100, ctx.currentTime);
+            oscillator.frequency.exponentialRampToValueAtTime(30, ctx.currentTime + 0.1);
+            gainNode.gain.setValueAtTime(1, ctx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.2);
+            return { oscillator, gainNode, duration: 0.2 };
+        });
+
+        this.sounds.parachute = this.createSound((ctx) => {
+            const oscillator = ctx.createOscillator();
+            const gainNode = ctx.createGain();
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(800, ctx.currentTime);
+            oscillator.frequency.exponentialRampToValueAtTime(400, ctx.currentTime + 0.3);
+            gainNode.gain.setValueAtTime(0.1, ctx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+            return { oscillator, gainNode, duration: 0.3 };
+        });
+
+        this.sounds.hit = this.createSound((ctx) => {
+            const oscillator = ctx.createOscillator();
+            const gainNode = ctx.createGain();
+            oscillator.type = 'square';
+            oscillator.frequency.setValueAtTime(200, ctx.currentTime);
+            oscillator.frequency.exponentialRampToValueAtTime(100, ctx.currentTime + 0.1);
+            gainNode.gain.setValueAtTime(0.3, ctx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
+            return { oscillator, gainNode, duration: 0.1 };
+        });
+
+        this.sounds.ground = this.createSound((ctx) => {
+            const oscillator = ctx.createOscillator();
+            const gainNode = ctx.createGain();
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(150, ctx.currentTime);
+            oscillator.frequency.exponentialRampToValueAtTime(50, ctx.currentTime + 0.15);
+            gainNode.gain.setValueAtTime(0.5, ctx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
+            return { oscillator, gainNode, duration: 0.15 };
+        });
+
+    this.sounds.toughHit = this.createSound((ctx) => {
+        const oscillator = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        oscillator.type = 'square';
+        oscillator.frequency.setValueAtTime(300, ctx.currentTime);
+        oscillator.frequency.exponentialRampToValueAtTime(150, ctx.currentTime + 0.15);
+        gainNode.gain.setValueAtTime(0.2, ctx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
+        return { oscillator, gainNode, duration: 0.15 };
+    });
+
+    this.sounds.airship = this.createSound((ctx) => {
+        const oscillator = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(100, ctx.currentTime);
+        oscillator.frequency.exponentialRampToValueAtTime(80, ctx.currentTime + 0.5);
+        gainNode.gain.setValueAtTime(0.15, ctx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+        return { oscillator, gainNode, duration: 0.5 };
+    });
+	
+    this.sounds.powerup = this.createSound((ctx) => {
+        const oscillator = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(400, ctx.currentTime);
+        oscillator.frequency.exponentialRampToValueAtTime(800, ctx.currentTime + 0.1);
+        oscillator.frequency.exponentialRampToValueAtTime(600, ctx.currentTime + 0.2);
+        gainNode.gain.setValueAtTime(0.3, ctx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.2);
+        return { oscillator, gainNode, duration: 0.2 };
+    });
+    }
+
+    createSound(setupFunction) {
+        return () => {
+            const { oscillator, gainNode, duration } = setupFunction(this.context);
+            oscillator.connect(gainNode);
+            gainNode.connect(this.context.destination);
+            oscillator.start(this.context.currentTime);
+            oscillator.stop(this.context.currentTime + duration);
+        };
+    }
+
+    playSound(soundName) {
+        if (this.context.state === 'suspended') {
+            this.context.resume();
+        }
+        if (this.sounds[soundName]) {
+            this.sounds[soundName]();
+        }
+    }
+}
+
+class Crate {
+    constructor(x) {
+        this.x = x;
+        this.y = 0;
+        this.width = 30;
+        this.height = 30;
+        this.speed = GAME_CONFIG.speed.crate;
+        this.active = true;
+        this.bonus = this.randomBonus();
+        this.rotation = 0;
+        this.rotationSpeed = (Math.random() - 0.5) * 0.002;
+    }
+
+    randomBonus() {
+        const bonuses = [
+            { type: 'points', value: 1000, color: '#ffd700', symbol: 'P' },  // Gold - Points
+            { type: 'life', value: 1, color: '#ff4444', symbol: '♥' },      // Red - Extra Life
+            { type: 'burst', value: 1, color: '#ff8800', symbol: 'B' },     // Orange - Burst Mode
+            { type: 'multishot', value: 300, color: '#44ff44', symbol: 'X' },// Green - Multishot
+            { type: 'slowmo', value: 300, color: '#aa44ff', symbol: 'SM' },  // Purple - Slow Motion
+            { type: 'nuke', value: 1, color: '#ff0000', symbol: 'N' },      // Red - Screen Nuke
+            { type: 'bigbullet', value: 300, color: '#4444ff', symbol: '◉' },// Blue - Big Bullets
+            { type: 'scorex2', value: 300, color: '#ffd700', symbol: '2X' }  // Yellow - Score x2
+        ];
+        return bonuses[Math.floor(Math.random() * bonuses.length)];
+    }
+
+    draw() {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.rotation);
+        // Draw crate base
+        ctx.fillStyle = this.bonus.color;
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        // Draw crate with 3D effect
+        ctx.beginPath();
+        ctx.fillRect(-this.width/2, -this.height/2, this.width, this.height);
+        ctx.strokeRect(-this.width/2, -this.height/2, this.width, this.height);
+        // Draw cross straps
+        ctx.beginPath();
+        ctx.moveTo(-this.width/2, 0);
+        ctx.lineTo(this.width/2, 0);
+        ctx.moveTo(0, -this.height/2);
+        ctx.lineTo(0, this.height/2);
+        ctx.strokeStyle = '#ffffff80';
+        ctx.stroke();
+        // Draw bonus symbol
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 16px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(this.bonus.symbol, 0, 0);
+        ctx.restore();
+    }
+    
+    update(deltaTime) {
+        this.y += this.speed * deltaTime;
+        this.rotation += this.rotationSpeed * deltaTime;
+        if (this.y > canvas.height) {
+            this.active = false;
+        }
+    }
+}
+
+        const game = new Game();
+        function gameLoop(timestamp) {
+            game.update(timestamp);
+            game.draw();
+            requestAnimationFrame(gameLoop);
+        }
+        if (isMobile) {
+            resizeCanvas();
+        }
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+</html>
